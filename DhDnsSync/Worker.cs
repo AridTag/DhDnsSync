@@ -5,47 +5,6 @@ using Microsoft.Extensions.Options;
 
 namespace DhDnsSync;
 
-public enum RecordUpdateMode
-{
-    EnsureExists,
-    PublicIp
-}
-
-public enum DnsRecordType
-{
-    MX,
-    TXT,
-    CNAME,
-    SRV,
-    A
-}
-
-public class DnsRecord
-{
-    public RecordUpdateMode UpdateMode { get; set; }
-    public DnsRecordType Type { get; set; }
-    public string Name { get; set; }
-    public string Value { get; set; }
-}
-
-public class DreamHostDnsRecord
-{
-    public string comment { get; set; }
-    public string account_id { get; set; }
-    public string value { get; set; }
-    public string zone { get; set; }
-    public string record { get; set; }
-    public string type { get; set; }
-    public string editable { get; set; }
-}
-
-public enum DnsActionResult
-{
-    Success,
-    Skipped,
-    Error
-}
-
 public class Worker : BackgroundService
 {
     private static readonly HttpClient HttpClient = new()
@@ -99,7 +58,7 @@ public class Worker : BackgroundService
     private async Task DoUpdate(DreamHostConfig config)
     {
         string? publicIp = null;
-        if (config.DnsRecords.Any(d => d.UpdateMode == RecordUpdateMode.PublicIp))
+        if (config.Zones.Any(z => z.DnsRecords.Any(d => d.UpdateMode == RecordUpdateMode.PublicIp)))
         {
             publicIp = await GetPublicIpAsync().ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(publicIp))
@@ -112,7 +71,7 @@ public class Worker : BackgroundService
         List<DreamHostDnsRecord> existingDnsRecords;
         try
         {
-            var dnsList = await GetDnsListAsync(config).ConfigureAwait(false);
+            var dnsList = await GetDnsListAsync(config.ApiKey).ConfigureAwait(false);
             if (dnsList == null)
             {
                 _Logger.LogError("Failed to retrieve dns listing. Are you sure your API key is valid?");
@@ -127,28 +86,30 @@ public class Worker : BackgroundService
             return;
         }
 
-        foreach (var configuredRecord in config.DnsRecords)
+        foreach (var zoneConfig in config.Zones)
         {
-            if (await ProcessRemovalAsync(config, configuredRecord, existingDnsRecords, publicIp).ConfigureAwait(false) == DnsActionResult.Error)
+            _Logger.LogInformation("Processing zone {Zone}", zoneConfig.Name);
+            foreach (var configuredRecord in zoneConfig.DnsRecords)
             {
-                continue;
-            }
+                var result = await ProcessRemovalAsync(config.ApiKey, zoneConfig, configuredRecord, existingDnsRecords, publicIp).ConfigureAwait(false);
+                if (result == DnsActionResult.Error)
+                {
+                    continue;
+                }
 
-            if (await ProcessAddAsync(config, configuredRecord, existingDnsRecords, publicIp).ConfigureAwait(false) == DnsActionResult.Error)
-            {
-                continue;
+                result = await ProcessAddAsync(config.ApiKey, zoneConfig, configuredRecord, existingDnsRecords, publicIp).ConfigureAwait(false);
             }
         }
     }
 
-    private static DreamHostDnsRecord? Match(DreamHostConfig config, DnsRecord configuredRecord, IReadOnlyList<DreamHostDnsRecord> dreamHostDnsRecords)
+    private static DreamHostDnsRecord? Match(DnsZone zoneConfig, DnsRecord configuredRecord, IReadOnlyList<DreamHostDnsRecord> dreamHostDnsRecords)
     {
-        return dreamHostDnsRecords.FirstOrDefault(d => d.record == config.Qualify(configuredRecord.Name) && d.type == configuredRecord.Type.ToString());
+        return dreamHostDnsRecords.FirstOrDefault(d => d.record == zoneConfig.Qualify(configuredRecord.Name) && d.type == configuredRecord.Type.ToString());
     }
 
-    private async Task<DnsActionResult> ProcessAddAsync(DreamHostConfig config, DnsRecord configuredRecord, IReadOnlyList<DreamHostDnsRecord> existingRecords, string? publicIp)
+    private async Task<DnsActionResult> ProcessAddAsync(string apiKey, DnsZone zoneConfig, DnsRecord configuredRecord, IReadOnlyList<DreamHostDnsRecord> existingRecords, string? publicIp)
     {
-        if (Match(config, configuredRecord, existingRecords) != null)
+        if (Match(zoneConfig, configuredRecord, existingRecords) != null)
         {
             return DnsActionResult.Skipped;
         }
@@ -181,7 +142,7 @@ public class Worker : BackgroundService
                 }
         }
 
-        if (!await AddDnsRecordAsync(config, config.Qualify(configuredRecord.Name), configuredRecord.Type.ToString(), valueToAdd).ConfigureAwait(false))
+        if (!await AddDnsRecordAsync(apiKey, zoneConfig.Qualify(configuredRecord.Name), configuredRecord.Type.ToString(), valueToAdd).ConfigureAwait(false))
         {
             return DnsActionResult.Error;
         }
@@ -189,9 +150,9 @@ public class Worker : BackgroundService
         return DnsActionResult.Success;
     }
 
-    private async Task<DnsActionResult> ProcessRemovalAsync(DreamHostConfig config, DnsRecord configuredRecord, List<DreamHostDnsRecord> existingRecords, string? publicIp)
+    private async Task<DnsActionResult> ProcessRemovalAsync(string apiKey, DnsZone zoneConfig, DnsRecord configuredRecord, List<DreamHostDnsRecord> existingRecords, string? publicIp)
     {
-        var dreamHostRecord = Match(config, configuredRecord, existingRecords);
+        var dreamHostRecord = Match(zoneConfig, configuredRecord, existingRecords);
         if (dreamHostRecord == default)
         {
             // Nothing to do.
@@ -213,7 +174,7 @@ public class Worker : BackgroundService
                         return DnsActionResult.Skipped;
                     }
                     
-                    if (await RemoveDnsRecordAsync(config, dreamHostRecord))
+                    if (await RemoveDnsRecordAsync(apiKey, dreamHostRecord))
                     {
                         existingRecords.Remove(dreamHostRecord);
                         return DnsActionResult.Success;
@@ -231,9 +192,9 @@ public class Worker : BackgroundService
         }
     }
     
-    private async Task<List<DreamHostDnsRecord>?> GetDnsListAsync(DreamHostConfig config)
+    private async Task<List<DreamHostDnsRecord>?> GetDnsListAsync(string apiKey)
     {
-        var response = await HttpClient.GetStringAsync($"/?key={config.ApiKey}&format=json&cmd=dns-list_records").ConfigureAwait(false);
+        var response = await HttpClient.GetStringAsync($"/?key={apiKey}&format=json&cmd=dns-list_records").ConfigureAwait(false);
         var asDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(response);
         if (asDict?.TryGetValue("result", out var successObj) != true || successObj.GetString() is not "success")
         {
@@ -248,10 +209,10 @@ public class Worker : BackgroundService
         return data.Deserialize<List<DreamHostDnsRecord>>();
     }
     
-    private async Task<bool> AddDnsRecordAsync(DreamHostConfig config, string record, string type, string value)
+    private async Task<bool> AddDnsRecordAsync(string apiKey, string record, string type, string value)
     {
         string recordArgs = $"&record={record}&type={type}&value={value}";
-        var response = await HttpClient.GetStringAsync($"/?key={config.ApiKey}&format=json&cmd=dns-add_record{recordArgs}").ConfigureAwait(false);
+        var response = await HttpClient.GetStringAsync($"/?key={apiKey}&format=json&cmd=dns-add_record{recordArgs}").ConfigureAwait(false);
         var asDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(response);
         if (asDict?.TryGetValue("result", out var successObj) != true || successObj.GetString() is not "success")
         {
@@ -261,10 +222,10 @@ public class Worker : BackgroundService
         return true;
     }
 
-    private async Task<bool> RemoveDnsRecordAsync(DreamHostConfig config, DreamHostDnsRecord record)
+    private async Task<bool> RemoveDnsRecordAsync(string apiKey, DreamHostDnsRecord record)
     {
         string recordArgs = $"&record={record.record}&type={record.type}&value={record.value}";
-        var response = await HttpClient.GetStringAsync($"/?key={config.ApiKey}&format=json&cmd=dns-remove_record{recordArgs}").ConfigureAwait(false);
+        var response = await HttpClient.GetStringAsync($"/?key={apiKey}&format=json&cmd=dns-remove_record{recordArgs}").ConfigureAwait(false);
         var asDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(response);
         if (asDict?.TryGetValue("result", out var successObj) != true || successObj.GetString() is not "success")
         {
@@ -272,5 +233,23 @@ public class Worker : BackgroundService
         }
         
         return true;
+    }
+
+    private enum DnsActionResult
+    {
+        Success,
+        Skipped,
+        Error
+    }
+
+    private class DreamHostDnsRecord
+    {
+        public string comment { get; set; }
+        public string account_id { get; set; }
+        public string value { get; set; }
+        public string zone { get; set; }
+        public string record { get; set; }
+        public string type { get; set; }
+        public string editable { get; set; }
     }
 }

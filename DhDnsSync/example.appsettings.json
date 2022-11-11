@@ -1,0 +1,43 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  
+  "DreamHostConfig": {
+    "UpdateIntervalMinutes": 60,
+    "ApiKey": "<insert key here>",
+    "Zones": [
+      {
+        "Name": "example1.com",
+        "DnsRecords": [
+          {
+            "UpdateMode": "PublicIp",
+            "Type": "A",
+            "Name": "@",
+            "Value": ""
+          },
+          {
+            "UpdateMode": "EnsureExists",
+            "Type": "MX",
+            "Name": "@",
+            "Value": "0 example1-com.mail.protection.outlook.com"
+          }
+        ]
+      },
+      {
+          "Name": "example2.com",
+          "DnsRecords": [
+              {
+                "UpdateMode": "EnsureExists",
+                "Type": "MX",
+                "Name": "@",
+                "Value": "0 example2-com.mail.protection.outlook.com"
+              }
+          ]
+      }
+    ]
+  }
+}
